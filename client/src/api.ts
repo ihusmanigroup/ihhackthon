@@ -7,6 +7,12 @@ export const api = {
   getDashboard: () => axios.get(`${API_BASE}/dashboard`).then(res => res.data),
   getCompany: () => axios.get(`${API_BASE}/company`).then(res => res.data),
   ingestCompany: (name: string, rawText: string) => axios.post(`${API_BASE}/company/ingest`, { name, rawText, sourceType: 'TEXT' }).then(res => res.data),
+  uploadCompanyPdf: (name: string, file: File) => {
+    const fd = new FormData();
+    fd.append('name', name);
+    fd.append('file', file);
+    return axios.post(`${API_BASE}/company/upload`, fd).then(res => res.data);
+  },
   retrieveKnowledge: (profileId: string, query: string, topK?: number) => axios.post(`${API_BASE}/company/retrieve`, { profileId, query, topK }).then(res => res.data),
   createICP: (data: any) => axios.post(`${API_BASE}/icp`, data).then(res => res.data),
   discoverLeads: (icpId?: string) => axios.post(`${API_BASE}/leads/discover`, { icpId }).then(res => res.data),

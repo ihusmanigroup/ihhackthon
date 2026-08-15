@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import multer from 'multer';
+import pdfParse from 'pdf-parse';
 import { query } from './db/db';
 import {
   ingestCompanyKnowledge,
@@ -22,6 +24,11 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 4 * 1024 * 1024 }
+});
 
 // 1. Health check
 app.get('/api/health', (req, res) => {
@@ -74,6 +81,21 @@ app.get('/api/company', async (req, res) => {
     res.json(profile.rows[0] || null);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// PDF upload ingestion
+app.post('/api/company/upload', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No PDF file uploaded' });
+  if (req.file.mimetype !== 'application/pdf') return res.status(400).json({ error: 'Only PDF files are supported' });
+  try {
+    const pdfData = await pdfParse(req.file.buffer);
+    const text = (pdfData.text || '').trim();
+    if (!text) return res.status(400).json({ error: 'No extractable text found in this PDF. It may be a scanned/image-only document.' });
+    const profile = await ingestCompanyKnowledge(req.body.name || 'Uploaded Company', text, 'PDF');
+    res.json({ success: true, chars: text.length, profile });
+  } catch (err: any) {
+    res.status(500).json({ error: 'PDF parsing failed: ' + err.message });
   }
 });
 
@@ -240,6 +262,11 @@ app.post('/api/scheduler/run', async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Multer / routing error handler (returns JSON instead of HTML)
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
 });
 
 export default app;

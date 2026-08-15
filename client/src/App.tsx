@@ -15,7 +15,8 @@ import {
   TrendingUp,
   Play,
   Activity,
-  Clock
+  Clock,
+  Upload
 } from 'lucide-react';
 import { api } from './api';
 
@@ -30,6 +31,9 @@ export default function App() {
   const [activityLog, setActivityLog] = useState<any[]>([]);
   const [followUps, setFollowUps] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [selectedPdf, setSelectedPdf] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState<string | null>(null);
   const [agentStatus, setAgentStatus] = useState<string>('Autonomous Agent Ready');
 
   const stageColor = (s: string) =>
@@ -330,6 +334,48 @@ export default function App() {
                   >
                     {loading ? 'Ingesting Knowledge...' : 'Ingest & Index Knowledge'}
                   </button>
+                  <div className="border-t border-[#27272A] pt-4">
+                    <label className="text-xs text-gray-300 font-medium">Or upload a company PDF (sample company)</label>
+                    <div className="flex items-center gap-3 mt-2">
+                      <label className="flex items-center gap-2 px-3 py-2 bg-[#18181B] border border-[#27272A] rounded-lg text-xs text-gray-300 hover:border-blue-500 cursor-pointer transition-all">
+                        <Upload className="w-4 h-4 text-blue-400" />
+                        {selectedPdf ? selectedPdf.name : 'Choose PDF file'}
+                        <input
+                          type="file"
+                          accept="application/pdf,.pdf"
+                          className="hidden"
+                          onChange={(e) => {
+                            setSelectedPdf(e.target.files?.[0] || null);
+                            setUploadMsg(null);
+                          }}
+                        />
+                      </label>
+                      <button
+                        onClick={async () => {
+                          if (!selectedPdf) return;
+                          setUploading(true);
+                          setUploadMsg(null);
+                          try {
+                            const r = await api.uploadCompanyPdf(companyName, selectedPdf);
+                            setUploadMsg(`Success: indexed ${r.chars} chars from "${r.profile.name}"`);
+                            setSelectedPdf(null);
+                            await refreshData();
+                          } catch (err: any) {
+                            setUploadMsg('Upload failed: ' + (err?.response?.data?.error || err.message));
+                          } finally {
+                            setUploading(false);
+                          }
+                        }}
+                        disabled={uploading || !selectedPdf}
+                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold shadow transition-all"
+                      >
+                        {uploading ? 'Uploading & Indexing...' : 'Upload PDF & Ingest'}
+                      </button>
+                    </div>
+                    {uploadMsg && (
+                      <p className="text-xs mt-2 font-mono text-cyan-300 break-all">{uploadMsg}</p>
+                    )}
+                  </div>
                 </div>
               </div>
 
