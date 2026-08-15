@@ -249,7 +249,85 @@ export async function detectCompanyName(text: string, fallback = ''): Promise<st
   if (name && name.length > 1) return name;
 
   const m = clean.match(/([A-Z][A-Za-z0-9&']*(?:\s+[A-Z][A-Za-z0-9&']*){0,3})/);
-  return (m ? m[1].trim().replace(/\.$/, '').trim() : fallback) || fallback;
+  if (!m) return fallback;
+  const words = m[1].trim().replace(/\.$/, '').split(/\s+/);
+  return words.filter((w, i) => i === 0 || w !== words[i - 1]).join(' ') || fallback;
+}
+
+// Extract a fixed set of company facts from a document. Every field is always
+// returned; fields the document does not mention come back as empty string /
+// empty array (never guessed).
+export async function extractCompanyFacts(text: string, detectedName: string) {
+  const clean = (text || '').replace(/\s+/g, ' ').trim();
+
+  const fallback: Record<string, any> = {
+    name: detectedName || '',
+    description: clean.slice(0, 400),
+    employees: '',
+    ceo: '',
+    hq: '',
+    founded: '',
+    industry: '',
+    website: '',
+    tagline: '',
+    offerings: []
+  };
+
+  const parsed = await callGemini(
+    'You are a B2B Sales Intelligence Agent extracting company facts from a document. Return STRICT JSON only. For every field, if the information is NOT present in the document, set it to an empty string (or empty array for offerings). Never invent, guess, or fill in missing data.',
+    `Extract the following fixed company facts from the document text below and return JSON:
+{
+  "name": "company name",
+  "description": "2-3 sentence overview of what the company does",
+  "employees": "number of employees (e.g. '250' or '1,200')",
+  "ceo": "name of the CEO or top executive",
+  "hq": "headquarters location (city, country)",
+  "founded": "founding year",
+  "industry": "industry / sector",
+  "website": "official website URL",
+  "tagline": "short tagline if present",
+  "offerings": ["service or product"]
+}
+
+Document text (truncated):
+${clean.slice(0, 4000)}
+
+Fallback company name: ${detectedName || 'not stated in document'}`,
+    true
+  );
+
+  if (parsed && typeof parsed === 'object') {
+    const name = String(parsed.name || '').trim();
+    const ceo = String(parsed.ceo || '').trim();
+    const founded = String(parsed.founded || '').trim();
+    let website = String(parsed.website || '').trim();
+    if (website && !/^https?:\/\//i.test(website)) website = '';
+    return {
+      name: name && name !== 'not known' ? name : detectedName,
+      description: String(parsed.description || fallback.description),
+      employees: String(parsed.employees || '').replace(/[^0-9,]/g, ''),
+      ceo: /^[A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*)*$/.test(ceo) ? ceo : '',
+      hq: String(parsed.hq || ''),
+      founded: (founded.match(/(19|20)\d{2}/) || [''])[0],
+      industry: String(parsed.industry || ''),
+      website,
+      tagline: String(parsed.tagline || ''),
+      offerings: Array.isArray(parsed.offerings) ? parsed.offerings.map(String) : []
+    };
+  }
+
+  const employeesM = clean.match(/(?:^|[^\d])(\d[\d,]*)\s*(?:\+|~)?\s*employees/i);
+  if (employeesM) fallback.employees = employeesM[1];
+  const ceoM = clean.match(/(?:CEO|Chief Executive Officer)\s*[:\-–]?\s*([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+)?)/i);
+  if (ceoM) {
+    const ceo = ceoM[1].trim();
+    fallback.ceo = /^[A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*)*$/.test(ceo) ? ceo : '';
+  }
+  const foundedM = clean.match(/(?:founded|established|incorporated)\s+(?:in\s+|since\s+)?((?:19|20)\d{2})/i);
+  if (foundedM) fallback.founded = foundedM[1];
+  const webM = clean.match(/https?:\/\/[^\s]+/i);
+  if (webM) fallback.website = webM[0].replace(/[).,;]+$/, '');
+  return fallback;
 }
 
 // Convert raw ICP answers into a structured ideal customer profile.

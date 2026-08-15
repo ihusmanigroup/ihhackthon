@@ -7,6 +7,7 @@ import { query } from './db/db';
 import {
   ingestCompanyKnowledge,
   detectCompanyName,
+  extractCompanyFacts,
   normalizeIcp,
   fetchPageText,
   discoverAndFilterLeads,
@@ -117,6 +118,33 @@ app.post('/api/company/detect-name', upload.single('file'), async (req, res) => 
     res.json({ name });
   } catch (err: any) {
     res.status(500).json({ error: 'Name detection failed: ' + err.message });
+  }
+});
+
+// Analyze a company PDF: extract fixed company facts (name, employees, CEO, HQ,
+// founded, industry, website, offerings) and index the full text into RAG.
+// Any fact the document doesn't mention comes back as an empty value.
+app.post('/api/company/analyze-pdf', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No PDF file uploaded' });
+  if (req.file.mimetype !== 'application/pdf') return res.status(400).json({ error: 'Only PDF files are supported' });
+  try {
+    const pdfData = await pdfParse(req.file.buffer);
+    const text = (pdfData.text || '').trim();
+    if (!text) return res.status(400).json({ error: 'No extractable text found in this PDF. It may be a scanned/image-only document.' });
+    const providedName = (req.body.name || '').trim();
+    const detectedName = providedName || (await detectCompanyName(text, ''));
+    const facts = await extractCompanyFacts(text, detectedName);
+    const profile = await ingestCompanyKnowledge(facts.name || detectedName, text, 'PDF');
+    res.json({
+      success: true,
+      chars: text.length,
+      name: facts.name || detectedName,
+      description: facts.description || profile.summary,
+      facts,
+      profile
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'PDF analysis failed: ' + err.message });
   }
 });
 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { 
   Building2, 
   Target, 
@@ -16,7 +16,7 @@ import {
   Play,
   Activity,
   Clock,
-  Upload
+  FileUp
 } from 'lucide-react';
 import { api } from './api';
 
@@ -26,7 +26,6 @@ export default function App() {
   const [leadDetail, setLeadDetail] = useState<any>(null);
   const [dashboardData, setDashboardData] = useState<any>(null);
   const [leadsList, setLeadsList] = useState<any[]>([]);
-  const [companyProfile, setCompanyProfile] = useState<any>(null);
   const [meetingsList, setMeetingsList] = useState<any[]>([]);
   const [activityLog, setActivityLog] = useState<any[]>([]);
   const [followUps, setFollowUps] = useState<any[]>([]);
@@ -38,8 +37,7 @@ export default function App() {
   const [icpMessage, setIcpMessage] = useState<string | null>(null);
   const [icpError, setIcpError] = useState<string | null>(null);
   const [agentStatus, setAgentStatus] = useState<string>('Autonomous Agent Ready');
-  const [detectingName, setDetectingName] = useState(false);
-  const [companyUrl, setCompanyUrl] = useState('');
+  const [companyFacts, setCompanyFacts] = useState<any>(null);
   const [structuredIcp, setStructuredIcp] = useState<any>(null);
   const [icpNormalizing, setIcpNormalizing] = useState(false);
 
@@ -66,17 +64,15 @@ export default function App() {
   // Fetch all pipeline and dashboard data from backend
   const refreshData = async () => {
     try {
-      const [dash, leads, comp, meets, activity, fups] = await Promise.all([
+      const [dash, leads, meets, activity, fups] = await Promise.all([
         api.getDashboard().catch(() => null),
         api.getLeads().catch(() => []),
-        api.getCompany().catch(() => null),
         api.getMeetings().catch(() => []),
         api.getActivity().catch(() => []),
         api.getFollowUps().catch(() => [])
       ]);
       if (dash) setDashboardData(dash);
       if (leads) setLeadsList(leads);
-      if (comp) setCompanyProfile(comp);
       if (meets) setMeetingsList(meets);
       if (activity) setActivityLog(activity);
       if (fups) setFollowUps(fups);
@@ -107,19 +103,31 @@ export default function App() {
     }
   };
 
-  // Fetch a website URL and auto-fill company name + description
-  const fetchUrl = async () => {
-    const url = companyUrl.trim();
-    if (!url) return;
+  // Drag-and-drop / file-pick a company PDF (analyzed when the button is clicked)
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handlePdfSelect = (file: File | null) => {
+    setSelectedPdf(file);
+    setUploadMsg(null);
+    setCompanyFacts(null);
+  };
+
+  // Analyze the selected PDF: extract fixed company facts (name, employees, CEO,
+  // HQ, founded, industry, website, offerings) and index it into RAG. Missing
+  // facts come back blank.
+  const analyzeCompanyPdf = async () => {
+    if (!selectedPdf) return;
     setUploading(true);
     setUploadMsg(null);
     try {
-      const r = await api.fetchCompanyFromUrl(url);
+      const r = await api.analyzeCompanyPdf(selectedPdf);
       if (r?.name) setCompanyName(r.name);
-      if (r?.text) setCompanyText(r.text.slice(0, 3000));
-      setUploadMsg(`Fetched "${r?.title || r?.name || url}" — company name & description auto-filled. Click Ingest to index it.`);
+      if (r?.description) setCompanyText(r.description);
+      setCompanyFacts(r?.facts || null);
+      setUploadMsg(`Analyzed "${r?.name}" — company profile extracted & indexed into RAG (${r?.chars} chars).`);
+      await refreshData();
     } catch (err: any) {
-      setUploadMsg('URL fetch failed: ' + (err?.response?.data?.error || err.message));
+      setUploadMsg('Analysis failed: ' + (err?.response?.data?.error || err.message));
     } finally {
       setUploading(false);
     }
@@ -346,130 +354,125 @@ export default function App() {
                 <h2 className="text-base font-semibold text-white flex items-center gap-2">
                   <Building2 className="w-5 h-5 text-blue-400" /> Company Knowledge Ingestion Layer (RAG)
                 </h2>
+                <p className="text-[11px] text-gray-500">
+                  Drop your company PDF here — the system reads it, extracts the company's fixed profile (name, employees, CEO,
+                  HQ, founded, industry, website, offerings) and indexes the full text so the sales agent can ground its work on it.
+                </p>
+
+                <div
+                  onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    handlePdfSelect(e.dataTransfer.files?.[0] || null);
+                  }}
+                  onClick={() => fileInputRef.current?.click()}
+                  className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all ${
+                    selectedPdf
+                      ? 'border-emerald-500/50 bg-emerald-500/5 hover:border-emerald-400'
+                      : 'border-[#27272A] bg-[#18181B]/50 hover:border-blue-500/50'
+                  }`}
+                >
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="application/pdf,.pdf"
+                    className="hidden"
+                    onChange={(e) => {
+                      handlePdfSelect(e.target.files?.[0] || null);
+                      e.target.value = '';
+                    }}
+                  />
+                  <FileUp className="w-8 h-8 mx-auto mb-2 text-blue-400" />
+                  {selectedPdf ? (
+                    <div>
+                      <p className="text-xs font-bold text-emerald-400 font-mono break-all">{selectedPdf.name}</p>
+                      <p className="text-[11px] text-gray-500 mt-1">Drag a new PDF here or click to replace — then click "Analyze Company PDF"</p>
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="text-xs font-semibold text-white">Drag & drop your company PDF here</p>
+                      <p className="text-[11px] text-gray-500 mt-1">or click to browse</p>
+                    </div>
+                  )}
+                </div>
+
                 <div className="space-y-3 pt-2">
                   <div>
-                    <label className="text-xs text-gray-300 font-medium flex items-center gap-2">
-                      Company Name
-                      {detectingName && (
-                        <span className="text-[10px] font-mono text-cyan-400 animate-pulse flex items-center gap-1">
-                          <Upload className="w-3 h-3" /> Detecting company name from file...
-                        </span>
-                      )}
+                    <label className="text-xs text-gray-300 font-medium">
+                      Company Name <span className="text-gray-600">(auto-filled from PDF)</span>
                     </label>
-                    <input 
-                      type="text" 
-                      value={companyName} 
-                      onChange={(e) => setCompanyName(e.target.value)}
-                      className="w-full mt-1 bg-[#18181B] border border-[#27272A] rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
+                    <input
+                      type="text"
+                      value={companyName}
+                      readOnly
+                      className="w-full mt-1 bg-[#18181B] border border-[#27272A] rounded-lg px-3 py-2 text-xs text-white focus:outline-none font-mono"
                     />
                   </div>
                   <div>
-                    <label className="text-xs text-gray-300 font-medium">Company Profile / Services Description (RAG Grounding Text)</label>
-                    <textarea 
+                    <label className="text-xs text-gray-300 font-medium">
+                      Company Profile / Services Description <span className="text-gray-600">(auto-filled from PDF)</span>
+                    </label>
+                    <textarea
                       rows={4}
                       value={companyText}
-                      onChange={(e) => setCompanyText(e.target.value)}
-                      className="w-full mt-1 bg-[#18181B] border border-[#27272A] rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
+                      readOnly
+                      className="w-full mt-1 bg-[#18181B] border border-[#27272A] rounded-lg px-3 py-2 text-xs text-white focus:outline-none font-mono"
                     />
                   </div>
-                  <button 
-                    onClick={async () => {
-                      setLoading(true);
-                      await api.ingestCompany(companyName, companyText);
-                      await refreshData();
-                      setLoading(false);
-                    }}
-                    disabled={loading}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold shadow transition-all"
+                  <button
+                    onClick={analyzeCompanyPdf}
+                    disabled={uploading || !selectedPdf}
+                    className="w-full px-4 py-3 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-2 shadow transition-all"
                   >
-                    {loading ? 'Ingesting Knowledge...' : 'Ingest & Index Knowledge'}
-                  </button>
-                  <div className="border-t border-[#27272A] pt-4">
-                    <label className="text-xs text-gray-300 font-medium">Or upload a company PDF (sample company)</label>
-                    <div className="flex items-center gap-3 mt-2">
-                      <label className="flex items-center gap-2 px-3 py-2 bg-[#18181B] border border-[#27272A] rounded-lg text-xs text-gray-300 hover:border-blue-500 cursor-pointer transition-all">
-                        <Upload className="w-4 h-4 text-blue-400" />
-                        {selectedPdf ? selectedPdf.name : 'Choose PDF file'}
-                        <input
-                          type="file"
-                          accept="application/pdf,.pdf"
-                          className="hidden"
-                          onChange={(e) => {
-                            const file = e.target.files?.[0] || null;
-                            setSelectedPdf(file);
-                            setUploadMsg(null);
-                            if (file) {
-                              setDetectingName(true);
-                              api.detectCompanyName(file)
-                                .then((r: any) => { if (r?.name) setCompanyName(r.name); })
-                                .catch(() => {})
-                                .finally(() => setDetectingName(false));
-                            }
-                          }}
-                        />
-                      </label>
-                      <button
-                        onClick={async () => {
-                          if (!selectedPdf) return;
-                          setUploading(true);
-                          setUploadMsg(null);
-                          try {
-                            const r = await api.uploadCompanyPdf(companyName, selectedPdf);
-                            setUploadMsg(`Success: indexed ${r.chars} chars from "${r.profile.name}"`);
-                            setSelectedPdf(null);
-                            await refreshData();
-                          } catch (err: any) {
-                            setUploadMsg('Upload failed: ' + (err?.response?.data?.error || err.message));
-                          } finally {
-                            setUploading(false);
-                          }
-                        }}
-                        disabled={uploading || !selectedPdf}
-                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold shadow transition-all"
-                      >
-                        {uploading ? 'Uploading & Indexing...' : 'Upload PDF & Ingest'}
-                      </button>
-                    </div>
-                    {uploadMsg && (
-                      <p className="text-xs mt-2 font-mono text-cyan-300 break-all">{uploadMsg}</p>
+                    {uploading ? (
+                      <>
+                        <Clock className="w-4 h-4 animate-spin" /> Analyzing Company PDF...
+                      </>
+                    ) : (
+                      <>
+                        <Search className="w-4 h-4" /> Analyze Company PDF
+                      </>
                     )}
-                  </div>
-
-                  <div className="border-t border-[#27272A] pt-4">
-                    <label className="text-xs text-gray-300 font-medium">Or auto-fill from a company website URL</label>
-                    <div className="flex items-center gap-3 mt-2">
-                      <input
-                        type="text"
-                        value={companyUrl}
-                        onChange={(e) => setCompanyUrl(e.target.value)}
-                        placeholder="https://your-company.com"
-                        className="flex-1 bg-[#18181B] border border-[#27272A] rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
-                      />
-                      <button
-                        onClick={fetchUrl}
-                        disabled={uploading || !companyUrl.trim()}
-                        className="px-4 py-2 bg-blue-600/20 border border-blue-500/40 text-blue-300 hover:bg-blue-600/40 disabled:opacity-40 text-white rounded-lg text-xs font-semibold shadow transition-all"
-                      >
-                        {uploading ? 'Fetching...' : 'Fetch & Auto-Fill'}
-                      </button>
-                    </div>
-                    <p className="text-[11px] text-gray-500 mt-2">
-                      Reads the site, detects the company name, and fills both the name and description fields for you.
-                    </p>
-                  </div>
+                  </button>
+                  {uploadMsg && (
+                    <p className="text-xs font-mono text-cyan-300 break-all">{uploadMsg}</p>
+                  )}
                 </div>
               </div>
 
-              {companyProfile && (
+              {companyFacts && (
                 <div className="p-6 bg-[#111113] border border-blue-500/30 rounded-xl space-y-4">
                   <div className="flex items-center justify-between border-b border-[#27272A] pb-3">
-                    <div>
-                      <h3 className="text-sm font-bold text-white">{companyProfile.name}</h3>
-                      <p className="text-xs text-blue-400">{companyProfile.tagline}</p>
+                    <div className="flex items-center gap-2">
+                      <Building2 className="w-4 h-4 text-blue-400" />
+                      <h3 className="text-sm font-bold text-white">Company Intelligence</h3>
                     </div>
                     <span className="text-[11px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono">RAG Indexed</span>
                   </div>
-                  <p className="text-xs text-gray-300 leading-relaxed">{companyProfile.summary}</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-xs">
+                    <FactRow label="Company Name" value={companyFacts.name} />
+                    <FactRow label="Number of Employees" value={companyFacts.employees} />
+                    <FactRow label="CEO" value={companyFacts.ceo} />
+                    <FactRow label="Headquarters" value={companyFacts.hq} />
+                    <FactRow label="Founded" value={companyFacts.founded} />
+                    <FactRow label="Industry" value={companyFacts.industry} />
+                    <FactRow label="Website" value={companyFacts.website} />
+                    <FactRow label="Tagline" value={companyFacts.tagline} />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-gray-500 uppercase tracking-wider font-mono">Description</label>
+                    <p className="text-xs text-gray-300 leading-relaxed mt-1">{companyFacts.description}</p>
+                  </div>
+                  {companyFacts.offerings?.length > 0 && (
+                    <div>
+                      <label className="text-[10px] text-gray-500 uppercase tracking-wider font-mono">Offerings</label>
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {companyFacts.offerings.map((o: string, i: number) => (
+                          <span key={i} className="text-[10px] px-2 py-1 bg-blue-500/10 border border-blue-500/30 text-blue-300 rounded font-mono">{o}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -997,6 +1000,15 @@ export default function App() {
 
         </main>
       </div>
+    </div>
+  );
+}
+
+function FactRow({ label, value }: { label: string; value?: string }) {
+  return (
+    <div>
+      <label className="text-[10px] text-gray-500 uppercase tracking-wider font-mono">{label}</label>
+      <p className="text-xs text-white font-semibold mt-0.5 break-all">{value || ''}</p>
     </div>
   );
 }
