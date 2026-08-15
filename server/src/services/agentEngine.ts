@@ -44,19 +44,33 @@ function hashEmbedding(text: string, dim = 64): number[] {
 }
 
 async function embedText(text: string): Promise<number[]> {
+  return (await embedTexts([text]))[0];
+}
+
+// Batch embeddings so ingestion makes ONE Gemini API call instead of one per
+// chunk (embeds up to 25 inputs per request, sized for API limits).
+async function embedTexts(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0) return [];
   if (!apiKey || process.env.DEMO_MODE === 'true') {
-    return hashEmbedding(text);
+    return texts.map((t) => hashEmbedding(t));
   }
+  const modelName = process.env.EMBEDDING_MODEL || 'text-embedding-004';
+  const embModel = genAI.getGenerativeModel({ model: modelName });
+  const BATCH_SIZE = 25;
+  const results: number[][] = [];
   try {
-    const embModel = genAI.getGenerativeModel({ model: process.env.EMBEDDING_MODEL || 'embedding-001' });
-    const res = await embModel.embedContent(text.slice(0, 2000));
-    const values = res.embedding.values;
-    if (values && values.length) return values;
-    return hashEmbedding(text);
+    for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+      const batch = texts.slice(i, i + BATCH_SIZE);
+      const res = await embModel.batchEmbedContents({
+        requests: batch.map((t) => ({ content: { role: 'user', parts: [{ text: t.slice(0, 2000) }] } }))
+      });
+      results.push(...res.embeddings.map((e) => e.values));
+    }
+    if (results.length === texts.length) return results;
   } catch (error) {
-    console.warn('⚠️ Embedding live call fallback:', error);
-    return hashEmbedding(text);
+    console.warn('⚠️ Batch embedding live call fallback:', error);
   }
+  return texts.map((t) => hashEmbedding(t));
 }
 
 function cosine(a: number[], b: number[]): number {
@@ -221,12 +235,13 @@ export async function ingestCompanyKnowledge(name: string, rawText: string, sour
     chunkTexts.push({ title: 'Limitation', content: l, category: 'limitation' });
   }
 
-  for (const chunk of chunkTexts) {
-    const embedding = await embedText(`${chunk.title}: ${chunk.content}`);
+  const embeddings = await embedTexts(chunkTexts.map((c) => `${c.title}: ${c.content}`));
+
+  for (let i = 0; i < chunkTexts.length; i++) {
     await query(
       `INSERT INTO knowledge_chunks (company_profile_id, title, content, category, embedding)
        VALUES ($1, $2, $3, $4, $5)`,
-      [profile.id, chunk.title, chunk.content, chunk.category, JSON.stringify(embedding)]
+      [profile.id, chunkTexts[i].title, chunkTexts[i].content, chunkTexts[i].category, JSON.stringify(embeddings[i])]
     );
   }
 
