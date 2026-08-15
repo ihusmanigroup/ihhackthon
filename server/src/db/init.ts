@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS icps (
     target_problem TEXT NOT NULL,
     exclusions TEXT,
     normalized_prompt TEXT,
+    focus_type TEXT,
+    focus TEXT,
+    qualification_rules JSONB,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 

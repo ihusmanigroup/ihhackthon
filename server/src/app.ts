@@ -6,6 +6,9 @@ import pdfParse from 'pdf-parse';
 import { query } from './db/db';
 import {
   ingestCompanyKnowledge,
+  detectCompanyName,
+  normalizeIcp,
+  fetchPageText,
   discoverAndFilterLeads,
   performDeepResearchAndQualification,
   generateAndSendOutreach,
@@ -92,21 +95,73 @@ app.post('/api/company/upload', upload.single('file'), async (req, res) => {
     const pdfData = await pdfParse(req.file.buffer);
     const text = (pdfData.text || '').trim();
     if (!text) return res.status(400).json({ error: 'No extractable text found in this PDF. It may be a scanned/image-only document.' });
-    const profile = await ingestCompanyKnowledge(req.body.name || 'Uploaded Company', text, 'PDF');
-    res.json({ success: true, chars: text.length, profile });
+    const providedName = (req.body.name || '').trim();
+    const detectedName = providedName || await detectCompanyName(text, 'Uploaded Company');
+    const profile = await ingestCompanyKnowledge(detectedName, text, 'PDF');
+    res.json({ success: true, chars: text.length, profile, detectedName });
   } catch (err: any) {
     res.status(500).json({ error: 'PDF parsing failed: ' + err.message });
+  }
+});
+
+// Detect company name from a PDF (auto-fills the Company Name field)
+app.post('/api/company/detect-name', upload.single('file'), async (req, res) => {
+  try {
+    let text = (req.body.text || '').toString();
+    if (req.file) {
+      const pdfData = await pdfParse(req.file.buffer);
+      text = (pdfData.text || '').trim();
+    }
+    if (!text) return res.status(400).json({ error: 'No text or file provided to detect a name from' });
+    const name = await detectCompanyName(text, '');
+    res.json({ name });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Name detection failed: ' + err.message });
+  }
+});
+
+// Fetch a website URL server-side and auto-fill company name + description
+app.post('/api/company/from-url', async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ error: 'No URL provided' });
+    const page = await fetchPageText(url);
+    const name = await detectCompanyName(page.title + ' ' + page.text, '');
+    res.json({ name: name || page.title, title: page.title, text: page.text, url });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to fetch URL: ' + err.message });
+  }
+});
+
+// Normalize raw ICP answers into a structured ideal customer profile
+app.post('/api/icp/normalize', async (req, res) => {
+  try {
+    const { location, industry, companySize, focusType, focus } = req.body;
+    const structured = await normalizeIcp({ location, industry, companySize, focusType, focus });
+    res.json(structured);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 });
 
 // 4. ICP Creation
 app.post('/api/icp', async (req, res) => {
   try {
-    const { location, industry, companySize, targetProblem, exclusions } = req.body;
+    const { location, industry, companySize, targetProblem, exclusions, focusType, focus, qualificationRules, normalizedPrompt } = req.body;
     const result = await query(
-      `INSERT INTO icps (location, industry, company_size, target_problem, exclusions)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [location, industry, companySize, targetProblem, exclusions]
+      `INSERT INTO icps (location, industry, company_size, target_problem, exclusions, normalized_prompt, focus_type, focus, qualification_rules)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [
+        location || 'United States',
+        industry || 'Logistics & Supply Chain',
+        companySize || '50-500 employees',
+        targetProblem || focus || '',
+        exclusions || null,
+        normalizedPrompt || null,
+        focusType || 'Problem',
+        focus || null,
+        qualificationRules ? JSON.stringify(qualificationRules) : null
+      ]
     );
     res.json(result.rows[0]);
   } catch (err: any) {

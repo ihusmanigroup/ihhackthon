@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import axios from 'axios';
 import dotenv from 'dotenv';
 import { query } from '../db/db';
 
@@ -234,6 +235,106 @@ function localProfile(name: string, rawText: string) {
   };
 }
 
+// Detect the company/organization name from raw document or page text.
+export async function detectCompanyName(text: string, fallback = ''): Promise<string> {
+  const clean = (text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return fallback;
+
+  const detected = await callGemini(
+    'You are a company-name extractor. Return strict JSON only.',
+    `From the document text below, extract the single most likely company/organization NAME (not a person name, not a generic word like "Home" or "Services"). Return JSON: {"name": "..."}\n\nText: ${clean.slice(0, 2500)}`,
+    true
+  );
+  const name = typeof detected?.name === 'string' ? detected.name.trim() : '';
+  if (name && name.length > 1) return name;
+
+  const m = clean.match(/([A-Z][A-Za-z0-9&']*(?:\s+[A-Z][A-Za-z0-9&']*){0,3})/);
+  return (m ? m[1].trim().replace(/\.$/, '').trim() : fallback) || fallback;
+}
+
+// Convert raw ICP answers into a structured ideal customer profile.
+export async function normalizeIcp(criteria: {
+  location?: string;
+  industry?: string;
+  companySize?: string;
+  focusType?: string;
+  focus?: string;
+  targetProblem?: string;
+}) {
+  const focusType = criteria.focusType || 'Problem';
+  const focus = criteria.focus || criteria.targetProblem || '';
+  const location = criteria.location || 'United States';
+  const industry = criteria.industry || 'Logistics & Supply Chain';
+  const companySize = criteria.companySize || '50-500 employees';
+
+  const normalized = await callGemini(
+    'You are a B2B sales operations analyst. Convert raw ICP answers into a structured ideal customer profile. Return strict JSON only.',
+    `RAW ICP ANSWERS:
+- Target location: ${location}
+- Target industry / market: ${industry}
+- Company size: ${companySize}
+- What we want to target specially (type: ${focusType}): ${focus}
+
+Return JSON:
+{
+  "location": "${location}",
+  "industry": "${industry}",
+  "sizeRange": "e.g. 50-500 employees",
+  "focusType": "${focusType}",
+  "focus": "clean one-line summary of the target",
+  "persona": "the decision-maker persona this outreach should speak to",
+  "buyingSignals": ["signal 1", "signal 2"],
+  "qualificationRules": ["rule 1", "rule 2"]
+}`,
+    true
+  );
+
+  if (normalized && typeof normalized === 'object' && normalized.industry) {
+    return {
+      location,
+      industry,
+      sizeRange: normalized.sizeRange || companySize,
+      focusType: normalized.focusType || focusType,
+      focus: normalized.focus || focus,
+      persona: normalized.persona || 'Head of Operations / Customer Experience leader',
+      buyingSignals: Array.isArray(normalized.buyingSignals) ? normalized.buyingSignals : ['High inquiry volume', 'Active support hiring'],
+      qualificationRules: Array.isArray(normalized.qualificationRules)
+        ? normalized.qualificationRules
+        : [`Operates in ${location}`, `Industry: ${industry}`, `Size within ${companySize}`]
+    };
+  }
+
+  return {
+    location,
+    industry,
+    sizeRange: companySize,
+    focusType,
+    focus,
+    persona: 'Head of Operations / Customer Experience leader',
+    buyingSignals: ['High inquiry volume', 'Active support hiring'],
+    qualificationRules: [`Operates in ${location}`, `Industry: ${industry}`, `Size within ${companySize}`]
+  };
+}
+
+// Fetch a website page server-side and strip it down to title + readable text.
+export async function fetchPageText(url: string): Promise<{ title: string; text: string }> {
+  const target = /^https?:\/\//i.test(url || '') ? url : `https://${url}`;
+  const res = await axios.get(target, {
+    timeout: 12000,
+    maxRedirects: 5,
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AutonomousSalesAgent/1.0)' }
+  });
+  const html = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+  const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1]?.trim() || target;
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return { title, text: text.slice(0, 6000) };
+}
+
 export async function ingestCompanyKnowledge(name: string, rawText: string, sourceType: 'PDF' | 'TEXT') {
   const start = Date.now();
   const systemPrompt = `You are a B2B Sales Intelligence Agent. Extract structured company profile facts. Return valid JSON only.
@@ -361,6 +462,22 @@ const CANDIDATES = [
   { name: 'Cornerstone Bakery Group', website: 'https://cornerstonebakery.example', industry: 'Bakery Retail', location: 'United States', size: '8 employees', sizeNum: 8, problemFit: 'Local storefront, no support automation need' }
 ];
 
+// Education / EdTech candidate universe (used when the ICP industry targets education).
+const EDUCATION_CANDIDATES = [
+  { name: 'BrightPath University', website: 'https://brightpath.example', industry: 'Higher Education & Training', location: 'United States', size: '420 employees', sizeNum: 420, problemFit: 'Admissions and student support inquiries handled manually across 40 programs' },
+  { name: 'CodeCampus Bootcamp', website: 'https://codecampus.example', industry: 'Coding Bootcamp (EdTech)', location: 'United States', size: '85 employees', sizeNum: 85, problemFit: 'Prospect and alumni engagement tracked in spreadsheets; slow responses' },
+  { name: 'LearnLane Institute', website: 'https://learnlane.example', industry: 'Education & Training', location: 'United States', size: '160 employees', sizeNum: 160, problemFit: 'Course inquiry triage via email only; no self-service chat' },
+  { name: 'SkillBridge Academy', website: 'https://skillbridge.example', industry: 'Online Education', location: 'United States', size: '210 employees', sizeNum: 210, problemFit: 'Learner support and certificate questions answered manually' },
+  { name: 'TechU Online', website: 'https://techu.example', industry: 'EdTech / Online University', location: 'United States', size: '300 employees', sizeNum: 300, problemFit: 'Student support backlog across 60 online courses' },
+  { name: 'DevMentor Collective', website: 'https://devmentor.example', industry: 'Coding Education & Training', location: 'United States', size: '65 employees', sizeNum: 65, problemFit: 'Mentor matching and career support outreach is fully manual' },
+  { name: 'Nordic Study Hub', website: 'https://nordicstudy.example', industry: 'Education & Training', location: 'Norway', size: '150 employees', sizeNum: 150, problemFit: 'European study-abroad admissions outreach' },
+  { name: 'Bella Pastry School', website: 'https://bellapastry.example', industry: 'Culinary School', location: 'Italy', size: '12 employees', sizeNum: 12, problemFit: 'Hands-on baking courses with no outbound B2B need' },
+  { name: 'QuickEats Online', website: 'https://quickeats.example', industry: 'Food Delivery', location: 'United States', size: '400 employees', sizeNum: 400, problemFit: 'Restaurant order status support automation' },
+  { name: 'Fashion Forward Retail', website: 'https://fashionforward.example', industry: 'Retail', location: 'United States', size: '500 employees', sizeNum: 500, problemFit: 'E-commerce returns and order support' },
+  { name: 'Corner Cafe Training', website: 'https://cornercafe.example', industry: 'Hospitality Training', location: 'United States', size: '8 employees', sizeNum: 8, problemFit: 'Local barista training with no automation need' },
+  { name: 'Global Manufacturing Co', website: 'https://globalmfg.example', industry: 'Manufacturing', location: 'United States', size: '800 employees', sizeNum: 800, problemFit: 'Factory floor support; no learner-facing programs' }
+];
+
 // Research evidence packs keyed by company name (decision-grade evidence per lead)
 const RESEARCH_MAP: Record<string, Array<{ source_type: string; source_url: string; title: string; snippet: string; confidence: string }>> = {
   'Apex Logistics Global': [
@@ -386,6 +503,31 @@ const RESEARCH_MAP: Record<string, Array<{ source_type: string; source_url: stri
   ],
   'Harbor City Movers': [
     { source_type: 'website', source_url: 'https://harborcitymovers.example', title: 'Website', snippet: 'Moves and logistics for US businesses; dispatch updates handled by phone.', confidence: 'Medium' }
+  ],
+  'BrightPath University': [
+    { source_type: 'news', source_url: 'https://edunews.example/brightpath-surge', title: 'Record Spring Enrollment Surge', snippet: 'BrightPath reported a 30% enrollment surge; the admissions office is overwhelmed with student inquiries.', confidence: 'High' },
+    { source_type: 'tech', source_url: 'https://builtwith.example/brightpath', title: 'Tech Stack Footprint', snippet: 'Uses email and phone for student support; no AI chat or WhatsApp automation detected.', confidence: 'High' },
+    { source_type: 'website', source_url: 'https://brightpath.example/careers', title: 'Careers Page Hiring Signals', snippet: 'Hiring enrollment and student-success coordinators to manage inquiry backlogs.', confidence: 'High' }
+  ],
+  'CodeCampus Bootcamp': [
+    { source_type: 'news', source_url: 'https://techgazette.example/codecampus', title: 'Bootcamp Expansion Announcement', snippet: 'CodeCampus doubled cohort capacity and is hiring admissions staff for prospect engagement.', confidence: 'High' },
+    { source_type: 'tech', source_url: 'https://builtwith.example/codecampus', title: 'Tech Stack Footprint', snippet: 'Leads tracked in a shared spreadsheet; no AI outreach automation detected.', confidence: 'High' }
+  ],
+  'LearnLane Institute': [
+    { source_type: 'website', source_url: 'https://learnlane.example', title: 'Website', snippet: 'Course inquiries handled over email; no automated triage or self-service chat for learners.', confidence: 'High' },
+    { source_type: 'news', source_url: 'https://learningweek.example/learnlane-catalog', title: 'Course Catalog Growth', snippet: 'LearnLane added 20 new courses, driving higher course-inquiry volume.', confidence: 'Medium' }
+  ],
+  'SkillBridge Academy': [
+    { source_type: 'tech', source_url: 'https://builtwith.example/skillbridge', title: 'Tech Stack Footprint', snippet: 'Legacy LMS with manual certificate verification; no AI support agent for learners.', confidence: 'High' },
+    { source_type: 'website', source_url: 'https://skillbridge.example/careers', title: 'Careers', snippet: 'Hiring student advisors to answer certificate and enrollment questions.', confidence: 'High' }
+  ],
+  'TechU Online': [
+    { source_type: 'news', source_url: 'https://edunews.example/techu-growth', title: 'Online Enrollment Growth', snippet: 'TechU online enrollment is up 25% and student-support SLAs are slipping.', confidence: 'High' },
+    { source_type: 'tech', source_url: 'https://builtwith.example/techu', title: 'Tech Stack Footprint', snippet: 'No automated WhatsApp or AI triage for student queries across online courses.', confidence: 'High' }
+  ],
+  'DevMentor Collective': [
+    { source_type: 'website', source_url: 'https://devmentor.example', title: 'Website', snippet: 'Mentor matching and career-support outreach done manually by coordinators.', confidence: 'Medium' },
+    { source_type: 'news', source_url: 'https://devnews.example/devmentor-career', title: 'Career Services Expansion', snippet: 'DevMentor is expanding career services to boost learner placement support.', confidence: 'Medium' }
   ]
 };
 
@@ -408,6 +550,25 @@ const CONTACTS_MAP: Record<string, Array<{ name: string; role: string; relevance
   ],
   'Harbor City Movers': [
     { name: 'Beth Kline', role: 'Operations Manager', relevance: 'High', email: 'b.kline@harborcitymovers.example', phone: '+1 (555) 336-7745', confidence: 'High' }
+  ],
+  'BrightPath University': [
+    { name: 'Dr. Amelia Hart', role: 'Dean of Admissions', relevance: 'High', email: 'a.hart@brightpath.example', phone: '+1 (555) 102-3344', confidence: 'High' },
+    { name: 'Prof. Liam Chen', role: 'Director of Student Services', relevance: 'High', email: 'l.chen@brightpath.example', phone: '+1 (555) 102-3345', confidence: 'High' }
+  ],
+  'CodeCampus Bootcamp': [
+    { name: 'Nina Okoye', role: 'Head of Admissions & Outreach', relevance: 'High', email: 'n.okoye@codecampus.example', phone: '+1 (555) 220-8810', confidence: 'High' }
+  ],
+  'LearnLane Institute': [
+    { name: 'Raj Mehta', role: 'Director of Operations', relevance: 'High', email: 'r.mehta@learnlane.example', phone: '+1 (555) 318-2290', confidence: 'High' }
+  ],
+  'SkillBridge Academy': [
+    { name: 'Tara Whitfield', role: 'Student Experience Lead', relevance: 'High', email: 't.whitfield@skillbridge.example', phone: '+1 (555) 402-1175', confidence: 'High' }
+  ],
+  'TechU Online': [
+    { name: 'Marcus Bennett', role: 'VP of Student Success', relevance: 'High', email: 'm.bennett@techu.example', phone: '+1 (555) 511-6622', confidence: 'High' }
+  ],
+  'DevMentor Collective': [
+    { name: 'Aisha Patel', role: 'Community & Career Programs Manager', relevance: 'High', email: 'a.patel@devmentor.example', phone: '+1 (555) 618-9034', confidence: 'High' }
   ]
 };
 
@@ -428,13 +589,20 @@ export async function discoverAndFilterLeads(icpId?: string) {
   const icpRes = icpId ? await query(`SELECT * FROM icps WHERE id = $1`, [icpId]) : { rows: [] };
   const icp = icpRes.rows[0];
   const criteria = icp || { location: 'United States', industry: 'Logistics & Supply Chain', companySize: '50-500 employees' };
-  const [sizeMin, sizeMax] = parseSizeRange(criteria.companySize);
+  const [sizeMin, sizeMax] = parseSizeRange(criteria.company_size || criteria.companySize);
   const keywords = icpKeywords(criteria.industry);
   const location = (criteria.location || '').toLowerCase();
+  const focusNote = (criteria.target_problem || criteria.focus || '').trim();
+
+  // Pick the seeded market that matches the ICP industry (education vs logistics).
+  const educationKeywords = ['education', 'learning', 'edtech', 'university', 'bootcamp', 'academy', 'training', 'school', 'student', 'course'];
+  const industryText = (criteria.industry || '').toLowerCase();
+  const useEducationMarket = educationKeywords.some((k) => industryText.includes(k));
+  const candidates = useEducationMarket ? EDUCATION_CANDIDATES : CANDIDATES;
 
   const processedLeads = [];
 
-  for (const item of CANDIDATES) {
+  for (const item of candidates) {
     const leadIndustry = (item.industry || '').toLowerCase();
     const leadLocation = (item.location || '').toLowerCase();
 
@@ -461,7 +629,7 @@ export async function discoverAndFilterLeads(icpId?: string) {
         `INSERT INTO leads (icp_id, name, website, industry, location, size, stage, confidence_score, score_explanation)
          VALUES ($1, $2, $3, $4, $5, $6, 'Potential', 65, $7) RETURNING *`,
         [icp?.id || null, item.name, item.website, item.industry, item.location, item.size,
-         `Passed Cheap Filtering: matches ICP (${criteria.industry}, ${criteria.location}, ${sizeMin}-${sizeMax}). Queued for Deep Research.`]
+         `Passed Cheap Filtering: matches ICP (${criteria.industry}, ${criteria.location}, ${sizeMin}-${sizeMax}). ${focusNote ? `Target focus: ${focusNote}. ` : ''}Queued for Deep Research.`]
       );
       processedLeads.push(lead.rows[0]);
     }
@@ -472,7 +640,7 @@ export async function discoverAndFilterLeads(icpId?: string) {
     'Discovery',
     'Search + Cheap Filter',
     'lead-database',
-    `candidates=${CANDIDATES.length}`,
+    `candidates=${candidates.length}`,
     `accepted=${accepted}, rejected=${processedLeads.length - accepted}`,
     `Cheap filtering complete: ${accepted} potential leads queued for deep research`,
     Date.now() - start
@@ -524,8 +692,10 @@ export async function performDeepResearchAndQualification(leadId: string) {
   const reasons: string[] = [];
 
   const keywords = icpKeywords(lead.industry || '');
-  const industrySignal = evidencePack.some(e => (e.title + ' ' + e.snippet).toLowerCase().includes('logistic'));
-  if (industrySignal) { score += 15; reasons.push('Strong ICP fit (logistics industry)'); }
+  const evidenceText = evidencePack.map((e) => (e.title + ' ' + e.snippet).toLowerCase()).join(' ');
+  const educationSignals = ['student', 'enrollment', 'admissions', 'learner', 'course', 'cohort', 'university', 'bootcamp', 'education', 'learning'];
+  const industrySignal = (keywords.length === 0 || keywords.some((k) => evidenceText.includes(k))) || educationSignals.some((s) => evidenceText.includes(s));
+  if (industrySignal) { score += 15; reasons.push('Strong ICP fit (industry evidence matched)'); }
 
   const newsSignal = evidencePack.some(e => e.source_type === 'news');
   if (newsSignal) { score += 10; reasons.push('Recent news / growth signal detected'); }

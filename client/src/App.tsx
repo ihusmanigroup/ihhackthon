@@ -34,7 +34,14 @@ export default function App() {
   const [selectedPdf, setSelectedPdf] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
+  const [lastIcpId, setLastIcpId] = useState<string | null>(null);
+  const [icpMessage, setIcpMessage] = useState<string | null>(null);
+  const [icpError, setIcpError] = useState<string | null>(null);
   const [agentStatus, setAgentStatus] = useState<string>('Autonomous Agent Ready');
+  const [detectingName, setDetectingName] = useState(false);
+  const [companyUrl, setCompanyUrl] = useState('');
+  const [structuredIcp, setStructuredIcp] = useState<any>(null);
+  const [icpNormalizing, setIcpNormalizing] = useState(false);
 
   const stageColor = (s: string) =>
     s === 'Qualified' ? 'bg-emerald-500/20 text-emerald-300' :
@@ -45,13 +52,14 @@ export default function App() {
     'bg-blue-500/20 text-blue-300';
 
   // Form states
-  const [companyName, setCompanyName] = useState('Nexus AI Dynamics');
-  const [companyText, setCompanyText] = useState('We build enterprise autonomous AI agents for B2B outbound sales pipelines, WhatsApp customer-support triage, and CRM integrations.');
+  const [companyName, setCompanyName] = useState('IH Academy');
+  const [companyText, setCompanyText] = useState('IH Academy is a technology-focused education and professional development platform under IH Usmani Group. It provides structured major and minor courses, practical projects, assessments, certifications, internship programs, and technical challenges across software engineering, web development, artificial intelligence, and machine learning.');
   const [icpForm, setIcpForm] = useState({
     location: 'United States',
-    industry: 'Logistics & Supply Chain',
+    industry: 'Education & Training',
     companySize: '50-500 employees',
-    targetProblem: 'High volume WhatsApp delivery tracking inquiries causing customer support backlogs'
+    focusType: 'Problem',
+    targetProblem: 'Student and learner support inquiries handled manually across courses, internships, and certificates'
   });
   const [replyInput, setReplyInput] = useState("Hi team, yes we are experiencing scaling issues with our delivery tracking support. Let's meet this Thursday at 3 PM to discuss.");
 
@@ -99,6 +107,40 @@ export default function App() {
     }
   };
 
+  // Fetch a website URL and auto-fill company name + description
+  const fetchUrl = async () => {
+    const url = companyUrl.trim();
+    if (!url) return;
+    setUploading(true);
+    setUploadMsg(null);
+    try {
+      const r = await api.fetchCompanyFromUrl(url);
+      if (r?.name) setCompanyName(r.name);
+      if (r?.text) setCompanyText(r.text.slice(0, 3000));
+      setUploadMsg(`Fetched "${r?.title || r?.name || url}" — company name & description auto-filled. Click Ingest to index it.`);
+    } catch (err: any) {
+      setUploadMsg('URL fetch failed: ' + (err?.response?.data?.error || err.message));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // Generate a structured ICP from the raw answers (preview before saving)
+  const generateStructuredIcp = async () => {
+    setIcpNormalizing(true);
+    setIcpError(null);
+    setIcpMessage(null);
+    try {
+      const structured = await api.normalizeIcp(icpForm);
+      setStructuredIcp(structured);
+      setIcpMessage('Structured ICP generated — review the summary below, then click "Search Market & Discover Leads" to save it and start lead generation.');
+    } catch (err: any) {
+      setIcpError('ICP normalization failed: ' + (err?.response?.data?.error || err.message));
+    } finally {
+      setIcpNormalizing(false);
+    }
+  };
+
   // 1-Click End-to-End Autonomous Pipeline Demo
   const runFullAutonomousDemo = async () => {
     setLoading(true);
@@ -108,6 +150,7 @@ export default function App() {
       
       setAgentStatus('Step 2/5: Creating ICP & Staged Lead Discovery...');
       const icp = await api.createICP(icpForm);
+      setLastIcpId(icp.id);
       const disc = await api.discoverLeads(icp.id);
       
       const apex = disc?.leads?.find((l: any) => l.name.includes('Apex')) || disc?.leads?.[0];
@@ -144,7 +187,7 @@ export default function App() {
               <Bot className="w-5 h-5 text-white" />
             </div>
             <div>
-              <div className="font-bold text-sm tracking-wide text-white">AGENTHACK AI</div>
+              <div className="font-bold text-sm tracking-wide text-white">USMANI AI SALES AGENT</div>
               <div className="text-[11px] text-[#94A3B8] font-mono">Autonomous Sales OS</div>
             </div>
           </div>
@@ -305,7 +348,14 @@ export default function App() {
                 </h2>
                 <div className="space-y-3 pt-2">
                   <div>
-                    <label className="text-xs text-gray-300 font-medium">Company Name</label>
+                    <label className="text-xs text-gray-300 font-medium flex items-center gap-2">
+                      Company Name
+                      {detectingName && (
+                        <span className="text-[10px] font-mono text-cyan-400 animate-pulse flex items-center gap-1">
+                          <Upload className="w-3 h-3" /> Detecting company name from file...
+                        </span>
+                      )}
+                    </label>
                     <input 
                       type="text" 
                       value={companyName} 
@@ -345,8 +395,16 @@ export default function App() {
                           accept="application/pdf,.pdf"
                           className="hidden"
                           onChange={(e) => {
-                            setSelectedPdf(e.target.files?.[0] || null);
+                            const file = e.target.files?.[0] || null;
+                            setSelectedPdf(file);
                             setUploadMsg(null);
+                            if (file) {
+                              setDetectingName(true);
+                              api.detectCompanyName(file)
+                                .then((r: any) => { if (r?.name) setCompanyName(r.name); })
+                                .catch(() => {})
+                                .finally(() => setDetectingName(false));
+                            }
                           }}
                         />
                       </label>
@@ -375,6 +433,29 @@ export default function App() {
                     {uploadMsg && (
                       <p className="text-xs mt-2 font-mono text-cyan-300 break-all">{uploadMsg}</p>
                     )}
+                  </div>
+
+                  <div className="border-t border-[#27272A] pt-4">
+                    <label className="text-xs text-gray-300 font-medium">Or auto-fill from a company website URL</label>
+                    <div className="flex items-center gap-3 mt-2">
+                      <input
+                        type="text"
+                        value={companyUrl}
+                        onChange={(e) => setCompanyUrl(e.target.value)}
+                        placeholder="https://your-company.com"
+                        className="flex-1 bg-[#18181B] border border-[#27272A] rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
+                      />
+                      <button
+                        onClick={fetchUrl}
+                        disabled={uploading || !companyUrl.trim()}
+                        className="px-4 py-2 bg-blue-600/20 border border-blue-500/40 text-blue-300 hover:bg-blue-600/40 disabled:opacity-40 text-white rounded-lg text-xs font-semibold shadow transition-all"
+                      >
+                        {uploading ? 'Fetching...' : 'Fetch & Auto-Fill'}
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-gray-500 mt-2">
+                      Reads the site, detects the company name, and fills both the name and description fields for you.
+                    </p>
                   </div>
                 </div>
               </div>
@@ -430,7 +511,20 @@ export default function App() {
                     />
                   </div>
                   <div>
-                    <label className="text-xs text-gray-300 font-medium">Target Problem</label>
+                    <label className="text-xs text-gray-300 font-medium">What do you want to target specially?</label>
+                    <select
+                      value={icpForm.focusType}
+                      onChange={(e) => setIcpForm({...icpForm, focusType: e.target.value})}
+                      className="w-full mt-1 bg-[#18181B] border border-[#27272A] rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500 font-mono"
+                    >
+                      <option value="Problem">Problem</option>
+                      <option value="Use Case">Use Case</option>
+                      <option value="Service">Service</option>
+                      <option value="Customer Type">Customer Type</option>
+                    </select>
+                  </div>
+                  <div className="col-span-2">
+                    <label className="text-xs text-gray-300 font-medium">Describe it — problem, use case, service, or type of customer</label>
                     <input 
                       type="text" 
                       value={icpForm.targetProblem}
@@ -440,31 +534,134 @@ export default function App() {
                   </div>
                 </div>
 
-                <button
-                  onClick={async () => {
-                    setLoading(true);
-                    const icp = await api.createICP(icpForm);
-                    await api.discoverLeads(icp.id);
-                    await refreshData();
-                    setActiveTab('leads');
-                    setLoading(false);
-                  }}
-                  disabled={loading}
-                  className="px-4 py-2 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 shadow"
-                >
-                  <Search className="w-3.5 h-3.5" /> Save ICP & Run Staged Lead Discovery
-                </button>
+                <div className="flex flex-wrap items-center gap-3 pt-1">
+                  <button
+                    onClick={generateStructuredIcp}
+                    disabled={icpNormalizing || loading}
+                    className="px-4 py-2 bg-purple-600/20 border border-purple-500/40 text-purple-300 hover:bg-purple-600/40 rounded-lg text-xs font-semibold flex items-center gap-2 shadow transition-all"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" /> {icpNormalizing ? 'Normalizing...' : 'Generate Structured ICP'}
+                  </button>
+                  <button
+                    onClick={async () => {
+                      setLoading(true);
+                      setIcpError(null);
+                      setIcpMessage(null);
+                      try {
+                        const payload = {
+                          ...icpForm,
+                          focus: structuredIcp?.focus || icpForm.targetProblem,
+                          qualificationRules: structuredIcp?.qualificationRules,
+                          normalizedPrompt: structuredIcp ? JSON.stringify(structuredIcp) : undefined
+                        };
+                        const icp = await api.createICP(payload);
+                        setLastIcpId(icp.id);
+                        const disc = await api.discoverLeads(icp.id);
+                        const leads = disc?.leads || [];
+                        const accepted = leads.filter((l: any) => l.stage !== 'Not Qualified').length;
+                        const rejected = leads.length - accepted;
+                        if (accepted === 0) {
+                          setIcpMessage(`Search done — ${accepted} accepted, ${rejected} rejected. No leads matched your ICP. Try industry "Education & Training", location "United States", size "50-500".`);
+                        } else {
+                          setIcpMessage(`Search done — ${accepted} accepted, ${rejected} rejected. Pick an accepted lead to run deep research.`);
+                        }
+                        await refreshData();
+                        setActiveTab('leads');
+                      } catch (err: any) {
+                        setIcpError('Search failed: ' + (err?.response?.data?.error || err.message));
+                      } finally {
+                        setLoading(false);
+                      }
+                    }}
+                    disabled={loading}
+                    className="px-4 py-2 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 shadow"
+                  >
+                    <Search className="w-3.5 h-3.5" /> Search Market & Discover Leads
+                  </button>
+                </div>
+                <p className="text-[11px] text-gray-500 leading-relaxed">
+                  First define the target customer (location, industry, size, and what to target), then discover leads — the system
+                  converts your answers into a structured ICP and cheap-filters every company against it.
+                </p>
+                {icpError && (
+                  <p className="text-[11px] font-mono text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">{icpError}</p>
+                )}
+                {icpMessage && (
+                  <p className="text-[11px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/30 rounded-lg px-3 py-2">{icpMessage}</p>
+                )}
+
+                {structuredIcp && (
+                  <div className="p-4 bg-[#0D0D12] border border-purple-500/40 rounded-xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-bold text-purple-300 uppercase font-mono flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5" /> Structured ICP Summary
+                      </h4>
+                      <span className="text-[10px] font-mono text-purple-400 bg-purple-500/20 px-2 py-0.5 rounded">READY</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                      <div><span className="text-gray-500">Location:</span> <span className="text-white">{structuredIcp.location}</span></div>
+                      <div><span className="text-gray-500">Industry:</span> <span className="text-white">{structuredIcp.industry}</span></div>
+                      <div><span className="text-gray-500">Size:</span> <span className="text-white">{structuredIcp.sizeRange}</span></div>
+                      <div><span className="text-gray-500">Focus type:</span> <span className="text-white">{structuredIcp.focusType}</span></div>
+                    </div>
+                    <div className="text-xs"><span className="text-gray-500">Focus:</span> <span className="text-white">{structuredIcp.focus}</span></div>
+                    <div className="text-xs"><span className="text-gray-500">Persona:</span> <span className="text-white">{structuredIcp.persona}</span></div>
+                    {structuredIcp.buyingSignals?.length > 0 && (
+                      <div className="text-xs">
+                        <span className="text-gray-500">Buying signals: </span>
+                        {structuredIcp.buyingSignals.map((s: string, i: number) => (
+                          <span key={i} className="text-blue-300">{i > 0 ? ', ' : ''}{s}</span>
+                        ))}
+                      </div>
+                    )}
+                    {structuredIcp.qualificationRules?.length > 0 && (
+                      <div className="text-xs">
+                        <span className="text-gray-500">Qualification rules: </span>
+                        {structuredIcp.qualificationRules.map((s: string, i: number) => (
+                          <span key={i} className="text-emerald-300">{i > 0 ? ' • ' : ''}{s}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}
 
           {/* TAB 4: LEADS & DEEP RESEARCH DETAIL */}
           {activeTab === 'leads' && (
+            leadsList.length === 0 ? (
+              <div className="max-w-xl mx-auto mt-16 p-8 bg-[#111113] border border-[#27272A] rounded-2xl text-center space-y-4">
+                <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-tr from-blue-600 to-purple-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+                  <Search className="w-7 h-7 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Start with your Ideal Customer Profile</h3>
+                  <p className="text-xs text-gray-400 leading-relaxed mt-2">
+                    Lead generation filters the market against your ICP — location, industry, size, and what you want to target.
+                    Complete your ICP first, then the leads will appear here ready for deep research.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setActiveTab('icp')}
+                  className="px-5 py-2.5 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 mx-auto shadow"
+                >
+                  <Target className="w-3.5 h-3.5" /> Go to ICP Builder
+                </button>
+              </div>
+            ) : (
             <div className="grid grid-cols-3 gap-6 max-w-7xl mx-auto">
               <div className="col-span-1 space-y-2">
                 <div className="flex items-center justify-between pb-1">
                   <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider font-mono">Discovered Leads</h3>
-                  <button onClick={() => api.discoverLeads().then(refreshData)} className="text-xs text-blue-400 hover:underline">+ Re-run</button>
+                  <button
+                    onClick={() => api.discoverLeads(lastIcpId || undefined).then(refreshData)}
+                    disabled={!lastIcpId}
+                    title={!lastIcpId ? 'Define your ICP first' : 'Re-run discovery'}
+                    className="text-xs text-blue-400 hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    + Re-run
+                  </button>
                 </div>
                 {leadsList.map((lead) => (
                   <div
@@ -690,7 +887,7 @@ export default function App() {
                 )}
               </div>
             </div>
-          )}
+            ))}
 
           {/* TAB 5: KANBAN PIPELINE */}
           {activeTab === 'pipeline' && (

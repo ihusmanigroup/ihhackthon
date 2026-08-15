@@ -13,6 +13,13 @@ export const api = {
     fd.append('file', file);
     return axios.post(`${API_BASE}/company/upload`, fd).then(res => res.data);
   },
+  detectCompanyName: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return axios.post(`${API_BASE}/company/detect-name`, fd).then(res => res.data);
+  },
+  fetchCompanyFromUrl: (url: string) => axios.post(`${API_BASE}/company/from-url`, { url }).then(res => res.data),
+  normalizeIcp: (data: any) => axios.post(`${API_BASE}/icp/normalize`, data).then(res => res.data),
   retrieveKnowledge: (profileId: string, query: string, topK?: number) => axios.post(`${API_BASE}/company/retrieve`, { profileId, query, topK }).then(res => res.data),
   createICP: (data: any) => axios.post(`${API_BASE}/icp`, data).then(res => res.data),
   discoverLeads: (icpId?: string) => axios.post(`${API_BASE}/leads/discover`, { icpId }).then(res => res.data),
