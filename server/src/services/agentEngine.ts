@@ -6,7 +6,7 @@ dotenv.config();
 
 const apiKey = process.env.GEMINI_API_KEY || '';
 const genAI = new GoogleGenerativeAI(apiKey);
-const model = genAI.getGenerativeModel({ model: process.env.GEMINI_MODEL || 'gemini-1.5-flash' });
+const model = genAI.getGenerativeModel({ model: process.env.GEMINI_MODEL || 'gemini-2.5-flash' });
 
 // ---------------------------------------------------------------------------
 // 0. Shared helpers: Gemini caller, embeddings, RAG retrieval, audit logging
@@ -54,7 +54,7 @@ async function embedTexts(texts: string[]): Promise<number[][]> {
   if (!apiKey || process.env.DEMO_MODE === 'true') {
     return texts.map((t) => hashEmbedding(t));
   }
-  const modelName = process.env.EMBEDDING_MODEL || 'text-embedding-004';
+  const modelName = process.env.EMBEDDING_MODEL || 'gemini-embedding-001';
   const embModel = genAI.getGenerativeModel({ model: modelName });
   const BATCH_SIZE = 25;
   const results: number[][] = [];
@@ -168,6 +168,72 @@ export async function markDoNotContact(leadId: string) {
 // 1. Company Knowledge & RAG Ingestion Agent
 // ---------------------------------------------------------------------------
 
+// Detect markdown headings (## / ### / bold titles) as chunk titles.
+function headingOf(line: string): string | null {
+  const h = line.match(/^#{1,4}\s+(.+)$/);
+  if (h) return h[1].replace(/[*_]/g, '').trim();
+  if (line.length <= 100) {
+    const b = line.match(/^\*\*(.+)\*\*$/);
+    if (b) return b[1].replace(/[*_]/g, '').trim();
+  }
+  return null;
+}
+
+// Fast, local document chunking: split markdown/plain text on headings and
+// paragraph boundaries into ~maxLen chunks. No LLM call, instant for RAG.
+function splitDocumentChunks(rawText: string, maxLen = 1800): Array<{ title: string; content: string; category: string }> {
+  const text = (rawText || '').replace(/\r\n/g, '\n');
+  const chunks: Array<{ title: string; content: string; category: string }> = [];
+  let title = 'Document Overview';
+  let buffer = '';
+
+  const flush = () => {
+    const content = buffer.trim();
+    if (content) chunks.push({ title, content, category: 'document' });
+    buffer = '';
+  };
+
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const h = headingOf(line);
+    if (h) {
+      flush();
+      title = h;
+      continue;
+    }
+
+    const contentLine = line.replace(/^\s*[-*+]\s+/, '').replace(/^\d+[.)]\s+/, '').replace(/^>+\s*/, '');
+    if (!contentLine) continue;
+    if (buffer.length + contentLine.length + 1 > maxLen) flush();
+    buffer += (buffer ? ' ' : '') + contentLine;
+  }
+  flush();
+
+  return chunks;
+}
+
+// Deterministic fallback profile when the LLM extraction is unavailable/slow.
+function localProfile(name: string, rawText: string) {
+  const headings: string[] = [];
+  for (const line of (rawText || '').split('\n')) {
+    const h = headingOf(line.trim());
+    if (h) headings.push(h);
+  }
+  const firstSentence = (rawText.match(/[^.\n]{40,}\./) || [rawText.slice(0, 200)])[0].trim();
+  return {
+    summary: firstSentence,
+    tagline: headings[0] || name,
+    offerings: headings.filter((h) => h && !/^\d+\./.test(h)).slice(0, 8),
+    targetIndustries: [] as string[],
+    caseStudies: [] as string[],
+    pricing: [] as string[],
+    techStack: [] as string[],
+    limitations: [] as string[]
+  };
+}
+
 export async function ingestCompanyKnowledge(name: string, rawText: string, sourceType: 'PDF' | 'TEXT') {
   const start = Date.now();
   const systemPrompt = `You are a B2B Sales Intelligence Agent. Extract structured company profile facts. Return valid JSON only.
@@ -182,19 +248,24 @@ export async function ingestCompanyKnowledge(name: string, rawText: string, sour
   "limitations": ["Limitations"]
 }`;
 
-  let extracted = await callGemini(systemPrompt, `Company: ${name}\nText: ${rawText}`);
+  let extracted = await callGemini(
+    systemPrompt,
+    `Company: ${name}\nText: ${rawText.slice(0, 3500)}${rawText.length > 3500 ? '\n[Document excerpt — summarize the profile from the beginning.]' : ''}`
+  );
 
   if (!extracted) {
-    extracted = {
-      summary: `${name} provides autonomous AI sales agents, WhatsApp customer-support automation, and CRM integrations.`,
-      tagline: 'Autonomous AI Sales & Operations Platform',
-      offerings: ['WhatsApp AI Support Automation', 'Autonomous AI Inbound/Outbound Sales Agent', 'Custom CRM Integrations'],
-      targetIndustries: ['Logistics & Supply Chain', 'B2B SaaS', 'E-commerce Platforms'],
-      caseStudies: ['Scaled outbound pipeline by 3.4x and cut inquiry latency to 10 seconds.'],
-      pricing: ['Starter: $1,200/mo', 'Enterprise: Custom'],
-      techStack: ['Node.js', 'React', 'Supabase', 'Google Gemini AI'],
-      limitations: ['Does not support manual analog cold calling without VoIP gateway.']
-    };
+    extracted = (rawText || '').length >= 1000
+      ? localProfile(name, rawText)
+      : {
+          summary: `${name} provides autonomous AI sales agents, WhatsApp customer-support automation, and CRM integrations.`,
+          tagline: 'Autonomous AI Sales & Operations Platform',
+          offerings: ['WhatsApp AI Support Automation', 'Autonomous AI Inbound/Outbound Sales Agent', 'Custom CRM Integrations'],
+          targetIndustries: ['Logistics & Supply Chain', 'B2B SaaS', 'E-commerce Platforms'],
+          caseStudies: ['Scaled outbound pipeline by 3.4x and cut inquiry latency to 10 seconds.'],
+          pricing: ['Starter: $1,200/mo', 'Enterprise: Custom'],
+          techStack: ['Node.js', 'React', 'Supabase', 'Google Gemini AI'],
+          limitations: ['Does not support manual analog cold calling without VoIP gateway.']
+        };
   }
 
   const result = await query(
@@ -217,31 +288,44 @@ export async function ingestCompanyKnowledge(name: string, rawText: string, sour
 
   const profile = result.rows[0];
 
-  const chunkTexts: Array<{ title: string; content: string; category: string }> = [];
-  chunkTexts.push({ title: 'Company Summary', content: extracted.summary, category: 'summary' });
-  for (const offering of extracted.offerings || []) {
-    chunkTexts.push({ title: `Service: ${offering}`, content: `Core capability: ${offering}`, category: 'offering' });
-  }
-  for (const cs of extracted.caseStudies || []) {
-    chunkTexts.push({ title: 'Case Study', content: cs, category: 'case_study' });
-  }
-  for (const p of extracted.pricing || []) {
-    chunkTexts.push({ title: 'Pricing', content: p, category: 'pricing' });
-  }
-  for (const t of extracted.techStack || []) {
-    chunkTexts.push({ title: 'Technology', content: t, category: 'tech' });
-  }
-  for (const l of extracted.limitations || []) {
-    chunkTexts.push({ title: 'Limitation', content: l, category: 'limitation' });
+  // RAG knowledge chunks. Long structured documents are indexed section by
+  // section (fast, local, no LLM) so all content is searchable; short inputs
+  // keep the profile-derived chunks.
+  let chunkTexts: Array<{ title: string; content: string; category: string }>;
+  if ((rawText || '').length >= 1000) {
+    chunkTexts = splitDocumentChunks(rawText);
+  } else {
+    chunkTexts = [];
+    chunkTexts.push({ title: 'Company Summary', content: extracted.summary, category: 'summary' });
+    for (const offering of extracted.offerings || []) {
+      chunkTexts.push({ title: `Service: ${offering}`, content: `Core capability: ${offering}`, category: 'offering' });
+    }
+    for (const cs of extracted.caseStudies || []) {
+      chunkTexts.push({ title: 'Case Study', content: cs, category: 'case_study' });
+    }
+    for (const p of extracted.pricing || []) {
+      chunkTexts.push({ title: 'Pricing', content: p, category: 'pricing' });
+    }
+    for (const t of extracted.techStack || []) {
+      chunkTexts.push({ title: 'Technology', content: t, category: 'tech' });
+    }
+    for (const l of extracted.limitations || []) {
+      chunkTexts.push({ title: 'Limitation', content: l, category: 'limitation' });
+    }
   }
 
   const embeddings = await embedTexts(chunkTexts.map((c) => `${c.title}: ${c.content}`));
 
+  const values: unknown[] = [];
+  const placeholders: string[] = [];
   for (let i = 0; i < chunkTexts.length; i++) {
+    placeholders.push(`($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`);
+    values.push(profile.id, chunkTexts[i].title, chunkTexts[i].content, chunkTexts[i].category, JSON.stringify(embeddings[i]));
+  }
+  if (chunkTexts.length) {
     await query(
-      `INSERT INTO knowledge_chunks (company_profile_id, title, content, category, embedding)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [profile.id, chunkTexts[i].title, chunkTexts[i].content, chunkTexts[i].category, JSON.stringify(embeddings[i])]
+      `INSERT INTO knowledge_chunks (company_profile_id, title, content, category, embedding) VALUES ${placeholders.join(', ')}`,
+      values
     );
   }
 
