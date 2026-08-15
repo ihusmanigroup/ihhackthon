@@ -162,6 +162,12 @@ CREATE TABLE IF NOT EXISTS agent_activity_logs (
     status TEXT DEFAULT 'success',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
+
+-- 12. Schema upgrades for new features (idempotent)
+ALTER TABLE knowledge_chunks ADD COLUMN IF NOT EXISTS embedding JSONB;
+ALTER TABLE follow_up_tasks ADD COLUMN IF NOT EXISTS next_action TEXT;
+CREATE INDEX IF NOT EXISTS idx_follow_up_due ON follow_up_tasks (status, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_meetings_reminder ON meetings (reminder_sent, meeting_time);
 `;
 
 async function init() {

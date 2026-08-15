@@ -13,20 +13,32 @@ import {
   ExternalLink,
   ChevronRight,
   TrendingUp,
-  Play
+  Play,
+  Activity,
+  Clock
 } from 'lucide-react';
 import { api } from './api';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'company' | 'icp' | 'leads' | 'pipeline' | 'meetings'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'company' | 'icp' | 'leads' | 'pipeline' | 'meetings' | 'activity'>('overview');
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
   const [leadDetail, setLeadDetail] = useState<any>(null);
   const [dashboardData, setDashboardData] = useState<any>(null);
   const [leadsList, setLeadsList] = useState<any[]>([]);
   const [companyProfile, setCompanyProfile] = useState<any>(null);
   const [meetingsList, setMeetingsList] = useState<any[]>([]);
+  const [activityLog, setActivityLog] = useState<any[]>([]);
+  const [followUps, setFollowUps] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [agentStatus, setAgentStatus] = useState<string>('Autonomous Agent Ready');
+
+  const stageColor = (s: string) =>
+    s === 'Qualified' ? 'bg-emerald-500/20 text-emerald-300' :
+    s === 'Meeting Scheduled' ? 'bg-purple-500/20 text-purple-300' :
+    s === 'Interested' ? 'bg-amber-500/20 text-amber-300' :
+    s === 'Not Qualified' || s === 'Not Interested' || s === 'Do Not Contact' ? 'bg-red-500/20 text-red-300' :
+    s === 'Converted' ? 'bg-emerald-500/20 text-emerald-300' :
+    'bg-blue-500/20 text-blue-300';
 
   // Form states
   const [companyName, setCompanyName] = useState('Nexus AI Dynamics');
@@ -42,16 +54,20 @@ export default function App() {
   // Fetch all pipeline and dashboard data from backend
   const refreshData = async () => {
     try {
-      const [dash, leads, comp, meets] = await Promise.all([
+      const [dash, leads, comp, meets, activity, fups] = await Promise.all([
         api.getDashboard().catch(() => null),
         api.getLeads().catch(() => []),
         api.getCompany().catch(() => null),
-        api.getMeetings().catch(() => [])
+        api.getMeetings().catch(() => []),
+        api.getActivity().catch(() => []),
+        api.getFollowUps().catch(() => [])
       ]);
       if (dash) setDashboardData(dash);
       if (leads) setLeadsList(leads);
       if (comp) setCompanyProfile(comp);
       if (meets) setMeetingsList(meets);
+      if (activity) setActivityLog(activity);
+      if (fups) setFollowUps(fups);
       if (selectedLeadId) {
         const detail = await api.getLeadDetail(selectedLeadId).catch(() => null);
         if (detail) setLeadDetail(detail);
@@ -138,6 +154,7 @@ export default function App() {
               { id: 'leads', label: 'Leads & Research', icon: Search },
               { id: 'pipeline', label: 'Kanban Pipeline', icon: Kanban },
               { id: 'meetings', label: 'Meetings & Briefs', icon: Calendar },
+              { id: 'activity', label: 'Agent Activity', icon: Activity },
             ].map((item) => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
@@ -240,11 +257,7 @@ export default function App() {
                             <div className="text-[11px] text-gray-400">{l.industry} • {l.size}</div>
                           </div>
                           <div className="flex items-center gap-3">
-                            <span className={`text-[11px] px-2 py-0.5 rounded font-mono ${
-                              l.stage === 'Qualified' ? 'bg-emerald-500/20 text-emerald-300' :
-                              l.stage === 'Meeting Scheduled' ? 'bg-purple-500/20 text-purple-300' :
-                              l.stage === 'Not Qualified' ? 'bg-red-500/20 text-red-300' : 'bg-blue-500/20 text-blue-300'
-                            }`}>
+                            <span className={`text-[11px] px-2 py-0.5 rounded font-mono ${stageColor(l.stage)}`}>
                               {l.stage}
                             </span>
                             <span className="text-xs font-mono font-bold text-blue-400">{l.confidence_score}%</span>
@@ -423,11 +436,7 @@ export default function App() {
                     </div>
                     <div className="text-[11px] text-gray-400 mt-1">{lead.industry} • {lead.location}</div>
                     <div className="mt-2 flex items-center justify-between">
-                      <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${
-                        lead.stage === 'Qualified' ? 'bg-emerald-500/20 text-emerald-300' :
-                        lead.stage === 'Meeting Scheduled' ? 'bg-purple-500/20 text-purple-300' :
-                        lead.stage === 'Not Qualified' ? 'bg-red-500/20 text-red-300' : 'bg-blue-500/20 text-blue-300'
-                      }`}>
+                      <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${stageColor(lead.stage)}`}>
                         {lead.stage}
                       </span>
                       <ChevronRight className="w-3.5 h-3.5 text-gray-500" />
@@ -473,6 +482,34 @@ export default function App() {
                             <Send className="w-3.5 h-3.5" /> Generate & Send Outreach
                           </button>
                         )}
+                        {leadDetail.lead.stage === 'Contacted' && (
+                          <button
+                            onClick={async () => {
+                              setLoading(true);
+                              await api.runFollowUp(leadDetail.lead.id).catch(() => {});
+                              await loadLead(leadDetail.lead.id);
+                              setLoading(false);
+                            }}
+                            disabled={loading}
+                            className="px-3 py-1.5 bg-amber-600/20 border border-amber-500/40 text-amber-300 rounded-lg text-xs font-semibold flex items-center gap-1.5"
+                          >
+                            <Clock className="w-3.5 h-3.5" /> Send Follow-up #2
+                          </button>
+                        )}
+                        {leadDetail.lead.stage !== 'Do Not Contact' && leadDetail.lead.stage !== 'Not Qualified' && (
+                          <button
+                            onClick={async () => {
+                              setLoading(true);
+                              await api.markDnc(leadDetail.lead.id);
+                              await loadLead(leadDetail.lead.id);
+                              setLoading(false);
+                            }}
+                            disabled={loading}
+                            className="px-3 py-1.5 bg-red-600/15 border border-red-500/40 text-red-300 rounded-lg text-xs font-semibold"
+                          >
+                            Do Not Contact
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -509,6 +546,62 @@ export default function App() {
                             </div>
                           ))}
                         </div>
+                      </div>
+                    )}
+
+                    {leadDetail.contacts?.length > 0 && (
+                      <div className="p-4 bg-[#111113] border border-[#27272A] rounded-xl space-y-2">
+                        <h4 className="text-xs font-bold text-gray-400 uppercase font-mono">Identified Decision Makers</h4>
+                        <div className="space-y-2">
+                          {leadDetail.contacts.map((c: any) => (
+                            <div key={c.id} className="p-2.5 bg-[#18181B] border border-[#27272A] rounded space-y-1">
+                              <div className="flex justify-between text-xs font-semibold text-white">
+                                <span>{c.name}</span>
+                                <span className="text-[10px] text-blue-400 font-mono">{c.relevance} relevance</span>
+                              </div>
+                              <div className="text-[11px] text-gray-300">{c.role}</div>
+                              <div className="text-[11px] text-gray-400 font-mono">{c.email} • {c.phone}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {followUps.filter((f: any) => f.lead_id === leadDetail.lead.id).length > 0 && (
+                      <div className="p-4 bg-[#111113] border border-[#27272A] rounded-xl space-y-2">
+                        <h4 className="text-xs font-bold text-gray-400 uppercase font-mono">Follow-Up Schedule</h4>
+                        {followUps.filter((f: any) => f.lead_id === leadDetail.lead.id).map((f: any) => (
+                          <div key={f.id} className="p-2.5 bg-[#18181B] border border-[#27272A] rounded flex items-center justify-between">
+                            <div>
+                              <div className="text-xs font-semibold text-white">Email #{f.sequence_step}</div>
+                              <div className="text-[11px] text-gray-400">{f.template_prompt}</div>
+                            </div>
+                            <div className="flex flex-col items-end gap-1">
+                              <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${
+                                f.status === 'executed' ? 'bg-emerald-500/20 text-emerald-300' :
+                                f.status === 'cancelled' ? 'bg-red-500/20 text-red-300' : 'bg-amber-500/20 text-amber-300'
+                              }`}>{f.status}</span>
+                              <span className="text-[10px] text-gray-500 font-mono">{new Date(f.scheduled_for).toLocaleDateString()}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {leadDetail.memories?.length > 0 && (
+                      <div className="p-4 bg-[#111113] border border-[#27272A] rounded-xl space-y-2">
+                        <h4 className="text-xs font-bold text-gray-400 uppercase font-mono">Agent Memory (Short & Long Term)</h4>
+                        {leadDetail.memories.map((m: any) => (
+                          <div key={m.id} className="p-2.5 bg-[#18181B] border border-[#27272A] rounded flex items-start justify-between gap-3">
+                            <div>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono mr-2 ${
+                                m.type === 'long_term' ? 'bg-purple-500/20 text-purple-300' : 'bg-blue-500/20 text-blue-300'
+                              }`}>{m.type}</span>
+                              <span className="text-[11px] text-gray-300">{m.content}</span>
+                            </div>
+                            <span className="text-[10px] text-gray-500 font-mono whitespace-nowrap">{new Date(m.created_at).toLocaleDateString()}</span>
+                          </div>
+                        ))}
                       </div>
                     )}
 
@@ -555,22 +648,29 @@ export default function App() {
 
           {/* TAB 5: KANBAN PIPELINE */}
           {activeTab === 'pipeline' && (
-            <div className="grid grid-cols-5 gap-3">
-              {['Discovered', 'Potential', 'Qualified', 'Contacted', 'Meeting Scheduled'].map((stg) => {
+            <div className="flex gap-3 overflow-x-auto pb-4 min-h-[400px]">
+              {['Discovered', 'Potential', 'Researching', 'Qualified', 'Contacted', 'Interested', 'Meeting Scheduled', 'Converted', 'Not Qualified', 'Not Interested', 'Do Not Contact'].map((stg) => {
                 const items = leadsList.filter((l) => l.stage === stg);
+                const negative = stg === 'Not Qualified' || stg === 'Not Interested' || stg === 'Do Not Contact';
+                const border = negative ? 'border-red-500/30' : stg === 'Meeting Scheduled' ? 'border-purple-500/30' : 'border-[#27272A]';
+                const header = negative ? 'text-red-400' : stg === 'Meeting Scheduled' ? 'text-purple-400' : 'text-white';
                 return (
-                  <div key={stg} className="p-3 bg-[#111113] border border-[#27272A] rounded-xl min-h-[400px]">
+                  <div key={stg} className={`p-3 bg-[#111113] border ${border} rounded-xl min-w-[190px] max-w-[190px] flex flex-col`}>
                     <div className="flex justify-between pb-2 border-b border-[#27272A]">
-                      <span className="text-xs font-bold text-white font-mono">{stg}</span>
-                      <span className="text-[11px] px-2 bg-[#18181B] text-gray-300 rounded font-mono">{items.length}</span>
+                      <span className={`text-xs font-bold font-mono ${header}`}>{stg}</span>
+                      <span className={`text-[11px] px-2 bg-[#18181B] rounded font-mono ${negative ? 'text-red-400' : 'text-gray-300'}`}>{items.length}</span>
                     </div>
-                    <div className="space-y-2 mt-3">
+                    <div className="space-y-2 mt-3 flex-1 overflow-y-auto">
                       {items.map((lead) => (
                         <div key={lead.id} onClick={() => loadLead(lead.id)} className="p-2.5 bg-[#18181B] border border-[#27272A] rounded cursor-pointer hover:border-gray-500">
                           <div className="text-xs font-bold text-white">{lead.name}</div>
                           <div className="text-[10px] text-blue-400 font-mono mt-1">{lead.confidence_score}% Fit</div>
+                          {lead.do_not_contact && <div className="text-[9px] text-red-400 font-mono mt-1">DNC</div>}
                         </div>
                       ))}
+                      {items.length === 0 && (
+                        <div className="text-[10px] text-gray-600 italic text-center py-3">—</div>
+                      )}
                     </div>
                   </div>
                 );
@@ -604,6 +704,51 @@ export default function App() {
                   </a>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* TAB 7: AGENT ACTIVITY & AUDIT */}
+          {activeTab === 'activity' && (
+            <div className="max-w-5xl mx-auto space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-semibold text-white flex items-center gap-2">
+                  <Activity className="w-5 h-5 text-purple-400" /> Agent Activity & Audit Trail
+                </h2>
+                <button
+                  onClick={async () => {
+                    setLoading(true);
+                    await api.runScheduler().catch(() => {});
+                    await refreshData();
+                    setLoading(false);
+                  }}
+                  disabled={loading}
+                  className="px-4 py-2 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 shadow"
+                >
+                  <Clock className="w-3.5 h-3.5" /> Run Durable Jobs (Follow-ups + Reminders)
+                </button>
+              </div>
+              <div className="space-y-2">
+                {activityLog.map((a: any) => (
+                  <div key={a.id} className="p-3 bg-[#111113] border border-[#27272A] rounded flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-white">
+                        {a.agent_name} <span className="text-gray-500 font-mono text-[10px]">→ {a.step}</span>
+                        {a.tool_used && <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-[#18181B] border border-[#27272A] text-blue-400 font-mono">{a.tool_used}</span>}
+                      </div>
+                      <div className="text-[11px] text-gray-400 mt-1">{a.decision || a.output_data}</div>
+                    </div>
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                        a.status === 'failed' ? 'bg-red-500/20 text-red-300' : 'bg-emerald-500/20 text-emerald-300'
+                      }`}>{a.status}</span>
+                      <span className="text-[10px] text-gray-500 font-mono">{new Date(a.created_at).toLocaleString()}</span>
+                    </div>
+                  </div>
+                ))}
+                {activityLog.length === 0 && (
+                  <div className="text-xs text-gray-500 italic text-center py-8">No agent activity yet. Run the demo to see the audit trail.</div>
+                )}
+              </div>
             </div>
           )}
 

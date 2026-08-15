@@ -7,8 +7,15 @@ import {
   discoverAndFilterLeads,
   performDeepResearchAndQualification,
   generateAndSendOutreach,
-  processInboundResponse
+  processInboundResponse,
+  retrieveKnowledge,
+  getActivityLogs,
+  getFollowUps,
+  markDoNotContact,
+  executeFollowUp,
+  runSchedulerOnce
 } from './services/agentEngine';
+import { startScheduler } from './scheduler';
 
 dotenv.config();
 
@@ -175,6 +182,69 @@ app.get('/api/meetings', async (req, res) => {
   }
 });
 
+// 10. RAG Semantic Retrieval over company knowledge
+app.post('/api/company/retrieve', async (req, res) => {
+  try {
+    const { profileId, query: q, topK } = req.body;
+    const hits = await retrieveKnowledge(profileId, q || 'customer support automation', topK || 3);
+    res.json({ success: true, hits });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 11. Agent Activity / Audit Log
+app.get('/api/activity', async (req, res) => {
+  try {
+    res.json(await getActivityLogs(parseInt(req.query.limit as string) || 50));
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 12. Follow-Up Tasks
+app.get('/api/followups', async (req, res) => {
+  try {
+    res.json(await getFollowUps());
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 13. Execute a specific follow-up now (Email #2)
+app.post('/api/leads/:id/followup', async (req, res) => {
+  try {
+    const followUps = await query(`SELECT id FROM follow_up_tasks WHERE lead_id = $1 AND status = 'pending' ORDER BY scheduled_for ASC`, [req.params.id]);
+    const task = followUps.rows[0];
+    if (!task) return res.status(404).json({ error: 'No pending follow-up for this lead' });
+    const msg = await executeFollowUp(task.id);
+    res.json({ success: true, message: msg });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 14. Mark Do Not Contact
+app.post('/api/leads/:id/dnc', async (req, res) => {
+  try {
+    const lead = await markDoNotContact(req.params.id);
+    res.json({ success: true, lead });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 15. Manual scheduler run (durable jobs: follow-ups + reminders)
+app.post('/api/scheduler/run', async (req, res) => {
+  try {
+    const result = await runSchedulerOnce();
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Node.js Sales Agent Server running on http://localhost:${PORT}`);
+  startScheduler();
 });
